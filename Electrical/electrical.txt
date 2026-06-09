@@ -1,0 +1,1 @@
+you can find here attched the electrical part of the project, including PCB, schematics and Wiring Diagrams.
