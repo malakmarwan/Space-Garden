@@ -1,0 +1,386 @@
+#include <Servo.h>
+#include <SoftwareSerial.h>
+
+// =====================================================
+// COMMUNICATION TO ARDUINO #2
+// =====================================================
+SoftwareSerial linkSerial(2, 7);   // RX, TX
+
+// =====================================================
+// TCS3200 COLOR SENSOR
+// =====================================================
+const int S0 = 4;
+const int S1 = 5;
+const int S2 = 11;
+const int S3 = 12;
+const int sensorOut = 8;
+
+// =====================================================
+// ULTRASONIC SENSOR
+// =====================================================
+const int trigPin = A2;
+const int echoPin = A3;
+
+long duration;
+int distance;
+const int threshold = 4;
+
+// =====================================================
+// SORTING SERVOS
+// =====================================================
+Servo servo1;
+Servo servo2;
+
+// =====================================================
+// SHOOTING SERVOS
+// =====================================================
+Servo blackServo;
+Servo blueServo;
+
+// =====================================================
+// SHOOTING POSITIONS
+// =====================================================
+int blackStart = 90;
+int blackEnd   = 20;
+
+int blueStart  = 140;
+int blueEnd    = 30;
+
+// =====================================================
+// COLOR REFERENCES
+// =====================================================
+int redRef[3]   = {0,0,0};
+int greenRef[3] = {0,0,0};
+int whiteRef[3] = {0,0,0};
+
+// =====================================================
+// COLOR VALUES
+// =====================================================
+int redValue;
+int greenValueVal;
+int blueValue;
+
+int tolerance = 60;
+
+String lastDetected = "NONE";
+
+// =====================================================
+// SHOOTING FLAG
+// =====================================================
+bool ballDetected = false;
+
+// =====================================================
+// SETUP
+// =====================================================
+void setup()
+{
+  Serial.begin(9600);
+  linkSerial.begin(9600);
+
+  // Color sensor
+  pinMode(S0, OUTPUT);
+  pinMode(S1, OUTPUT);
+  pinMode(S2, OUTPUT);
+  pinMode(S3, OUTPUT);
+  pinMode(sensorOut, INPUT);
+
+  digitalWrite(S0, HIGH);
+  digitalWrite(S1, LOW);
+
+  // Ultrasonic
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  // Sorting servos
+  servo1.attach(9);
+  servo2.attach(10);
+
+  servo1.write(90);   // stop continuous servo
+  servo2.write(73);
+
+  // Shooting servos
+  blackServo.attach(6);
+  blueServo.attach(3);
+
+  blackServo.write(blackStart);
+  blueServo.write(blueStart);
+
+  Serial.println("Send:");
+  Serial.println("r = save RED");
+  Serial.println("g = save GREEN");
+  Serial.println("w = save WHITE");
+}
+
+// =====================================================
+// MAIN LOOP
+// =====================================================
+void loop()
+{
+  checkShooting();
+
+  readColor();
+
+  // Print RGB values
+  Serial.print("R: ");
+  Serial.print(redValue);
+
+  Serial.print("  G: ");
+  Serial.print(greenValueVal);
+
+  Serial.print("  B: ");
+  Serial.println(blueValue);
+
+  // Calibration commands
+  if (Serial.available())
+  {
+    char input = Serial.read();
+
+    if (input == 'r')
+    {
+      redRef[0] = redValue;
+      redRef[1] = greenValueVal;
+      redRef[2] = blueValue;
+
+      Serial.println("RED saved");
+    }
+
+    if (input == 'g')
+    {
+      greenRef[0] = redValue;
+      greenRef[1] = greenValueVal;
+      greenRef[2] = blueValue;
+
+      Serial.println("GREEN saved");
+    }
+
+    if (input == 'w')
+    {
+      whiteRef[0] = redValue;
+      whiteRef[1] = greenValueVal;
+      whiteRef[2] = blueValue;
+
+      Serial.println("WHITE saved");
+    }
+  }
+
+  String detected = detectColor();
+
+  Serial.print("Detected: ");
+  Serial.println(detected);
+
+  // =====================================================
+  // SORT ONLY WHEN WHITE -> RED OR WHITE -> GREEN
+  // =====================================================
+  if (lastDetected == "WHITE")
+  {
+    if (detected == "RED")
+    {
+      linkSerial.println("SORTING");
+
+      moveRed();
+
+      lastDetected = detected;
+    }
+
+    else if (detected == "GREEN")
+    {
+      linkSerial.println("SORTING");
+
+      moveGreen();
+
+      lastDetected = detected;
+    }
+  }
+  else
+  {
+    lastDetected = detected;
+  }
+
+  delay(300);
+}
+
+// =====================================================
+// SHOOTING SYSTEM
+// =====================================================
+void checkShooting()
+{
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(trigPin, LOW);
+
+  duration = pulseIn(echoPin, HIGH);
+
+  distance = duration * 0.034 / 2;
+
+  if (distance <= threshold && !ballDetected)
+  {
+    ballDetected = true;
+
+    linkSerial.println("SHOOTING");
+
+    blackServo.write(blackEnd);
+    delay(3000);
+
+    blueServo.write(blueEnd);
+    delay(1500);
+
+    blackServo.write(blackStart);
+    delay(3000);
+
+    blueServo.write(blueStart);
+    delay(1000);
+  }
+
+  if (distance > threshold)
+  {
+    ballDetected = false;
+  }
+}
+
+// =====================================================
+// READ COLOR
+// =====================================================
+void readColor()
+{
+  long r = 0;
+  long g = 0;
+  long b = 0;
+
+  for (int i = 0; i < 5; i++)
+  {
+    // RED
+    digitalWrite(S2, LOW);
+    digitalWrite(S3, LOW);
+    r += pulseIn(sensorOut, LOW);
+
+    // GREEN
+    digitalWrite(S2, HIGH);
+    digitalWrite(S3, HIGH);
+    g += pulseIn(sensorOut, LOW);
+
+    // BLUE
+    digitalWrite(S2, LOW);
+    digitalWrite(S3, HIGH);
+    b += pulseIn(sensorOut, LOW);
+  }
+
+  redValue      = r / 5;
+  greenValueVal = g / 5;
+  blueValue     = b / 5;
+}
+
+// =====================================================
+// DETECT COLOR
+// =====================================================
+String detectColor()
+{
+  long redDiff =
+      colorDistance(
+          redValue,
+          greenValueVal,
+          blueValue,
+          redRef);
+
+  long greenDiff =
+      colorDistance(
+          redValue,
+          greenValueVal,
+          blueValue,
+          greenRef);
+
+  long whiteDiff =
+      colorDistance(
+          redValue,
+          greenValueVal,
+          blueValue,
+          whiteRef);
+
+  if (redDiff < tolerance &&
+      redDiff < greenDiff &&
+      redDiff < whiteDiff)
+  {
+    return "RED";
+  }
+
+  else if (greenDiff < tolerance &&
+           greenDiff < redDiff &&
+           greenDiff < whiteDiff)
+  {
+    return "GREEN";
+  }
+
+  else if (whiteDiff < tolerance &&
+           whiteDiff < redDiff &&
+           whiteDiff < greenDiff)
+  {
+    return "WHITE";
+  }
+
+  return "UNKNOWN";
+}
+
+// =====================================================
+// COLOR DISTANCE
+// =====================================================
+long colorDistance(
+    int r,
+    int g,
+    int b,
+    int ref[3])
+{
+  return abs(r - ref[0]) +
+         abs(g - ref[1]) +
+         abs(b - ref[2]);
+}
+
+// =====================================================
+// RED SORTING
+// =====================================================
+void moveRed()
+{
+  // rotate forward
+  servo1.write(0);
+  delay(300);      // adjust until it rotates about 90°
+
+  // stop
+  servo1.write(90);
+  delay(200);
+
+  // rotate back
+  servo1.write(180);
+  delay(300);      // same time as forward
+
+  // stop
+  servo1.write(90);
+
+  servo2.write(87);
+  delay(700);
+
+  servo2.write(73);
+}
+
+// =====================================================
+// GREEN SORTING
+// =====================================================
+void moveGreen()
+{
+  servo1.write(0);
+  delay(300);
+
+  servo1.write(90);
+  delay(200);
+
+  servo1.write(180);
+  delay(300);
+
+  servo1.write(90);
+
+  servo2.write(55);
+  delay(700);
+
+  servo2.write(73);
+}
