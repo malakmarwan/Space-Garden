@@ -1,0 +1,89 @@
+import processing.serial.*;
+
+Serial myPort;
+String val = "";
+String displayMsg = "Waiting..."; 
+color statusColor = color(250, 220, 150); 
+PImage bg;
+
+void setup() {
+  // 1. حددي مقاس الشاشة أولاً برقم ثابت (مثلاً 900x700)
+  size(900, 700); 
+  
+  // 2. تحميل الصورة
+  bg = loadImage("bg.jpg");
+  
+  // 3. لو الصورة موجودة، هنخليها تاخد مقاس الشاشة اللي حددناها فوق بالظبط
+  if (bg != null) {
+    bg.resize(width, height);
+  }
+  
+  myPort = new Serial(this, "COM11", 38400);
+  textAlign(CENTER, CENTER);
+}
+
+void draw() {
+  if (bg != null) {
+    // استخدمي image بدلاً من background عشان نتفادى مشكلة المقاس
+    image(bg, 0, 0); 
+  } else {
+    background(255, 218, 221);
+  }
+  
+  // العناوين والمعادلة (نفس الكود)
+  fill(80, 60, 60); 
+  textSize(32);
+  text("Math Game: Remote Control Panel", width/2, 120);
+  
+  fill(45, 105, 155);
+  textSize(90);
+  text(displayMsg, width/2, height/2 - 40);
+  
+  noStroke();
+  fill(statusColor);
+  ellipse(width/2, height/2 + 150, 110, 110);
+  
+  fill(180, 160, 100);
+  textSize(50);
+  text("V", width/2, height/2 + 145); 
+
+  fill(100, 80, 80);
+  textSize(18);
+  text("Type numbers on keyboard and press ENTER to submit", width/2, height - 80);
+
+  if (myPort.available() > 0) {
+    val = myPort.readStringUntil('\n');
+    if (val != null) {
+      val = val.trim();
+      processInput(val);
+    }
+  }
+}
+
+void processInput(String data) {
+  if (data.contains("New Question:")) {
+    displayMsg = data.replace("New Question: ", "");
+    statusColor = color(250, 220, 150); 
+  } 
+  else if (data.contains("Typing:")) {
+    displayMsg = data.replace("Typing: ", ""); 
+  }
+  else if (data.contains("Correct")) {
+    displayMsg = "Correct!";
+    statusColor = color(180, 230, 180); 
+  } 
+  else if (data.contains("Wrong")) {
+    displayMsg = "Try Again";
+    statusColor = color(255, 180, 180); 
+  }
+}
+
+void keyPressed() {
+  if ((key >= '0' && key <= '9') || key == '#' || key == '*') {
+    myPort.write(key);
+  } else if (key == ENTER || key == RETURN) {
+    myPort.write('#');
+  } else if (key == 's' || key == 'S') {
+    myPort.write('s');
+  }
+}
