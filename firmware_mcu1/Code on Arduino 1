@@ -1,0 +1,333 @@
+#include <Wire.h>
+
+#include <LiquidCrystal_I2C.h>
+#include <Keypad.h>
+#include <Servo.h>
+#include <SoftwareSerial.h>
+
+// ================= LCD =================
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// ================= Arduino #1 LINK =================
+SoftwareSerial linkSerial(2, A2); // RX, TX
+
+// ================= SERVO =================
+Servo startServo;
+const int servoPin = 6;
+
+// ================= PUSH BUTTON =================
+const int buttonPin = A3;
+
+bool lastButtonState = HIGH;
+unsigned long lastPressTime = 0;
+const int debounceDelay = 60;
+
+// Servo auto-return variables
+bool servoMoving = false;
+unsigned long servoStartTime = 0;
+const unsigned long servoOpenTime = 5000;
+
+// Servo auto start after motor stops
+bool servoScheduled = false;
+unsigned long motorStopTime = 0;
+const unsigned long servoDelayAfterMotor = 30000; // 30 seconds
+
+// ================= ULTRASONIC =================
+const int trigPin = A0;
+const int echoPin = A1;
+
+long duration;
+int distance;
+const int threshold = 3;
+
+// ================= MOTOR (L298N) =================
+const int IN1 = 4;
+const int IN2 = 3;
+const int ENA = 5;
+
+const unsigned long motorRunTime = 15000; // 15 seconds
+bool motorRunning = false;
+unsigned long motorStartTime = 0;
+
+// ================= KEYPAD 4x3 =================
+const byte ROW_NUM = 4;
+const byte COLUMN_NUM = 3;
+
+char keys[ROW_NUM][COLUMN_NUM] = {
+  {'1','2','3'},
+  {'4','5','6'},
+  {'7','8','9'},
+  {'*','0','#'}
+};
+
+byte pin_rows[ROW_NUM] = {13, 7, 8, 9};
+byte pin_column[COLUMN_NUM] = {10, 11, 12};
+
+Keypad keypad = Keypad(makeKeymap(keys), pin_rows, pin_column, ROW_NUM, COLUMN_NUM);
+
+// ================= GAME =================
+int num1, num2, correctAnswer;
+char op;
+String input = "";
+
+bool gameStarted = false;
+bool waitingForBall = false;
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(9600); // البلوتوث HC-05 متصل هنا برمجياً ويلقط تلقائياً
+  linkSerial.begin(9600);
+
+  lcd.init();
+  lcd.backlight();
+
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(ENA, OUTPUT);
+
+  pinMode(buttonPin, INPUT_PULLUP);
+
+  startServo.attach(servoPin);
+  startServo.write(0);
+
+  stopMotor();
+
+  lcd.clear();
+  lcd.print("Press # Start");
+}
+
+// ================= LOOP =================
+void loop() {
+  // استقبال داتا من الأردوينو الآخر وإرسالها أيضاً للـ GUI بالبلوتوث
+  if (linkSerial.available()) {
+    String msg = linkSerial.readStringUntil('\n');
+    msg.trim();
+    Serial.println(msg); // تمرير الرسالة للـ Processing عبر البلوتوث
+    showMessage(msg);
+  }
+
+  // قراءة بيانات البلوتوث المستقبلة من كيبورد اللابتوب (Processing)
+  if (Serial.available()) {
+    char pcKey = Serial.read();
+    handleIncomingKey(pcKey); // فانكشن للتعامل مع الإدخال القادم من البلوتوث
+  }
+
+  // ================= PUSH BUTTON SERVO =================
+  bool buttonState = digitalRead(buttonPin);
+
+  if (buttonState == LOW && lastButtonState == HIGH) {
+    if (!servoMoving && millis() - lastPressTime > debounceDelay) {
+      startServo.write(1000);      // Move to 90°
+      servoMoving = true;
+      servoStartTime = millis();
+      lastPressTime = millis();
+    }
+  }
+
+  lastButtonState = buttonState;
+
+  if (servoMoving && millis() - servoStartTime >= servoOpenTime) {
+    startServo.write(0);
+    servoMoving = false;
+  }
+// Automatic servo movement 30 seconds after motor stops
+if (servoScheduled &&
+    !servoMoving &&
+    millis() - motorStopTime >= servoDelayAfterMotor) {
+
+  startServo.write(90);
+  servoMoving = true;
+  servoStartTime = millis();
+  servoScheduled = false;
+}
+  // ================= KEYPAD PHYSICAL =================
+  char key = keypad.getKey();
+  if (key) {
+    handleIncomingKey(key);
+  }
+
+  // ================= ULTRASONIC + MOTOR =================
+  if (waitingForBall) {
+    readUltrasonic();
+
+    if (!motorRunning && distance <= threshold && distance > 0) {
+      lcd.clear();
+      lcd.print("Lifting");
+
+      linkSerial.println("LIFTING");
+      Serial.println("LIFTING"); // إرسال حالة الرفع للـ Processing بالبلوتوث
+
+      startMotor();
+      motorRunning = true;
+      motorStartTime = millis();
+    }
+
+    if (motorRunning && millis() - motorStartTime >= motorRunTime) {
+  stopMotor();
+  motorRunning = false;
+  waitingForBall = false;
+
+  // Start 30-second timer for servo
+  motorStopTime = millis();
+  servoScheduled = true;
+
+  delay(300);
+  generateQuestion();
+}
+  }
+}
+
+// ================= HANDLE KEYS (PHYSICAL & BLUETOOTH) =================
+void handleIncomingKey(char key) {
+  if (!gameStarted) {
+    if (key == '#') {
+      gameStarted = true;
+      lcd.clear();
+      lcd.print("Game Started");
+      Serial.println("Game Started"); // إرسال للـ Processing بالبلوتوث
+      delay(1000);
+      generateQuestion();
+    }
+    return;
+  }
+
+  if (key >= '0' && key <= '9') {
+    input += key;
+    lcd.setCursor(input.length() - 1, 1);
+    lcd.print(key);
+    
+    // إرسال الأرقام الجاري كتابتها للـ Processing أول بأول
+    Serial.print("Typing: ");
+    Serial.println(input);
+  }
+
+  if (key == '*') {
+    generateQuestion();
+  }
+
+  if (key == '#') {
+    checkAnswer();
+  }
+}
+
+// ================= QUESTION =================
+void generateQuestion() {
+  int r = random(0, 3);
+  num1 = random(1, 10);
+  num2 = random(1, 10);
+
+  if (r == 0) {
+    op = '+';
+    correctAnswer = num1 + num2;
+  }
+  else if (r == 1) {
+    if (num1 < num2) {
+      int temp = num1;
+      num1 = num2;
+      num2 = temp;
+    }
+    op = '-';
+    correctAnswer = num1 - num2;
+  }
+  else {
+    op = '*';
+    correctAnswer = num1 * num2;
+  }
+
+  lcd.clear();
+  lcd.print(num1);
+  lcd.print(op);
+  lcd.print(num2);
+  lcd.print("=?");
+
+  // إرسال المسألة الجديدة كاملة للـ GUI عبر البلوتوث
+  Serial.print("New Question: ");
+  Serial.print(num1);
+  Serial.print(op);
+  Serial.print(num2);
+  Serial.println("=?");
+
+  input = "";
+}
+
+// ================= CHECK ANSWER =================
+void checkAnswer() {
+  int ans = input.toInt();
+  lcd.clear();
+
+  if (ans == correctAnswer) {
+    lcd.print("Correct!");
+    Serial.println("Correct"); // إشعار الـ GUI بالبلوتوث
+    delay(1000);
+
+    lcd.clear();
+    lcd.print("Put Ball");
+    Serial.println("Put Ball"); // إشعار الـ GUI بالبلوتوث
+    waitingForBall = true;
+  }
+  else {
+    lcd.print("Wrong!");
+    Serial.println("Wrong"); // إشعار الـ GUI بالبلوتوث
+    delay(1200);
+    generateQuestion();
+  }
+  input = "";
+}
+
+// ================= ULTRASONIC =================
+void readUltrasonic() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  duration = pulseIn(echoPin, HIGH, 30000);
+  distance = duration * 0.034 / 2;
+
+  if (distance == 0 || distance > 200)
+    distance = 999;
+}
+
+// ================= MOTOR =================
+void startMotor() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  analogWrite(ENA, 200);
+}
+
+void stopMotor() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  analogWrite(ENA, 0);
+}
+
+// ================= LCD MESSAGES =================
+void showMessage(String msg) {
+  lcd.clear();
+  if (msg == "SHOOTING") lcd.print("Now Shooting");
+  else if (msg == "SORTING") lcd.print("Now Sorting");
+  else if (msg == "LIFTING") lcd.print("Lifting...");
+  else lcd.print(msg);
+
+  delay(1200);
+
+  if (waitingForBall) {
+    lcd.clear();
+    lcd.print("Put Ball");
+  }
+  else if (gameStarted) {
+    lcd.clear();
+    lcd.print(num1);
+    lcd.print(op);
+    lcd.print(num2);
+    lcd.print("=?");
+  }
+  else {
+    lcd.clear();
+    lcd.print("Press # Start");
+  }
+}
